@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, extname, join } from 'node:path';
-import { callJson, llmAvailable } from './llm.js';
+import { callJson, callJsonWithCustomPrompt, llmAvailable } from './llm.js';
 import { renderSlides } from './render.js';
 import { ruleQa } from './steps/qa.js';
 import { z } from 'zod';
 import { BriefSchema, CopySchema, type Brief, type Copy, type Qa } from './schema.js';
+import { PERSONAS, getPersonaPrompt } from './personas.js';
 
 export const ROOT = join(import.meta.dirname, '../..');
 export const OUTPUT_DIR = join(ROOT, 'output');
@@ -168,4 +169,53 @@ export async function writeCopy(brief: Brief, variation?: Variation): Promise<{ 
     throw err;
   }
   return { copy, qa };
+}
+
+export interface PersonaCopyResult {
+  personaId: string;
+  personaName: string;
+  personaEmoji: string;
+  copy: Copy;
+  qa: Qa;
+}
+
+export async function writeAllPersonasCopy(brief: Brief, variation?: Variation): Promise<PersonaCopyResult[]> {
+  if (!llmAvailable) throw new Error('Нет ключа Gemini — нечем написать тексты');
+  const results: PersonaCopyResult[] = [];
+
+  for (const persona of PERSONAS) {
+    const systemPrompt = getPersonaPrompt(persona);
+    let copy = await callJsonWithCustomPrompt(
+      systemPrompt,
+      variation ? { ...brief, VARIATION: variation } : brief,
+      CopySchema,
+      { temperature: 1.1 },
+    );
+    let qa = ruleQa(brief, copy);
+    if (!qa.pass) {
+      try {
+        for (let round = 1; round <= 2; round++) {
+          copy = await callJsonWithCustomPrompt(
+            systemPrompt,
+            { brief, carousel: copy, issues: qa.issues },
+            CopySchema,
+            { temperature: 1.1 },
+          );
+          qa = ruleQa(brief, copy);
+          if (qa.pass) break;
+        }
+      } catch (err) {
+        if (!isRateLimit(err)) throw err;
+      }
+    }
+    results.push({
+      personaId: persona.id,
+      personaName: persona.name,
+      personaEmoji: persona.emoji,
+      copy,
+      qa,
+    });
+  }
+
+  return results;
 }

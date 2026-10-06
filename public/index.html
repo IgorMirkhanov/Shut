@@ -46,6 +46,12 @@ dialog::backdrop{background:#000c}
 #pw-box{align-items:center;gap:8px}
 #pw-box:not(.hidden){display:flex}
 #pw-box input{width:160px;padding:6px 10px}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin:-20px -20px 16px;padding:16px 20px 0;overflow-x:auto}
+.tab{padding:8px 14px;border:0;background:transparent;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-weight:600;white-space:nowrap}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.personas-content{display:none}
+.personas-content.active{display:block}
 @media (max-width:800px){.layout{grid-template-columns:1fr}}
 </style>
 </head>
@@ -79,6 +85,7 @@ dialog::backdrop{background:#000c}
 Слайд 3 (польза): ошибка 1 — копить остаток
 ...
 Слайд 7 (призыв): полный чек-лист по кодовому слову"></textarea>
+    <label style="margin-top:16px;font-weight:400"><input type="checkbox" id="usePersonas"> 🎭 Генерировать 10 вариантов от разных персон</label>
     <div class="row">
       <button id="run" onclick="run()">Сгенерировать</button>
       <button class="ghost hidden" id="retry" onclick="retry()">Повторить</button>
@@ -126,6 +133,7 @@ let blobs = [];
 let failedStep = null;
 let lastVariation = null;
 let password = localStorage.getItem(PW) || '';
+let personas = null;
 
 function slug(raw) {
   const s = String(raw ?? '').trim().toLowerCase().replace(/[^a-zа-яё0-9_-]+/gi, '-').replace(/^-+|-+$/g, '').slice(0, 60);
@@ -213,7 +221,7 @@ function makeVariation(text) {
 }
 function upsertProject(p) {
   const list = loadList().filter(x => x.name !== p.name);
-  list.unshift({ name: p.name, topic: p.brief?.topic ?? p.name, brief: p.brief, copy: p.copy, qa: p.qa, text: p.text, updated: Date.now() });
+  list.unshift({ name: p.name, topic: p.brief?.topic ?? p.name, brief: p.brief, copy: p.copy, qa: p.qa, text: p.text, personas: p.personas, updated: Date.now() });
   saveList(list);
 }
 
@@ -311,7 +319,43 @@ function showResult(p) {
   current = p;
   $('result').classList.remove('hidden');
   $('r-title').textContent = p.brief?.topic || p.name;
-  $('caption').textContent = p.caption || formatCaption(p.copy);
+  if (personas && personas.length > 0) {
+    showPersonasResult(personas);
+  } else {
+    $('caption').textContent = p.caption || formatCaption(p.copy);
+    showQa(p.qa);
+    showEdits(p.copy);
+  }
+}
+
+function showPersonasResult(results) {
+  const tabs = results.map((r, i) =>
+    `<button class="tab ${i === 0 ? 'active' : ''}" onclick="selectPersona(${i})">${r.personaEmoji} ${esc(r.personaName)}</button>`
+  ).join('');
+
+  let tabsHtml = `<div class="tabs">${tabs}</div>`;
+  const resultEl = $('result');
+  const oldTabs = resultEl.querySelector('.tabs');
+  if (oldTabs) oldTabs.remove();
+
+  const qaEl = $('qa');
+  qaEl.insertAdjacentHTML('beforebegin', tabsHtml);
+
+  selectPersona(0);
+}
+
+function selectPersona(idx) {
+  if (!personas || !personas[idx]) return;
+  const p = personas[idx];
+
+  // Update tabs
+  document.querySelectorAll('.tab').forEach((tab, i) => {
+    if (i === idx) tab.classList.add('active');
+    else tab.classList.remove('active');
+  });
+
+  // Update content
+  $('caption').textContent = formatCaption(p.copy);
   showQa(p.qa);
   showEdits(p.copy);
 }
@@ -320,6 +364,7 @@ async function openProject(name) {
   const p = loadList().find(x => x.name === name);
   if (!p) return;
   current = p;
+  personas = p.personas || null;
   $('name').value = p.name;
   $('text').value = p.text || (p.brief ? JSON.stringify(p.brief, null, 2) : '');
   showResult(p);
@@ -327,7 +372,10 @@ async function openProject(name) {
   $('log').classList.remove('hidden');
   $('log').textContent = 'Перерисовка слайдов…';
   try {
-    await renderSlides(p.brief, p.copy);
+    const copyToRender = personas ? personas[0]?.copy : p.copy;
+    if (copyToRender) {
+      await renderSlides(p.brief, copyToRender);
+    }
     logLine('Готово');
   } catch (e) {
     failedStep = 'render';
@@ -366,15 +414,31 @@ async function runFrom(step) {
     if (step === 'copy' || !current.copy) {
       logLine('[2] Тексты и проверка…');
       failedStep = 'copy';
-      const { copy, qa } = await api('/api/copy', { method: 'POST', body: JSON.stringify({ brief: current.brief, variation }) });
-      addAvoid(text, copy.slides.map(s => s.headline), current.brief.slides.map(s => s.idea));
-      lastVariation = null;
-      current.copy = copy; current.qa = qa;
-      current.caption = formatCaption(copy);
-      upsertProject(current);
-      showResult(current);
-      renderProjects();
-      logLine('[2] Готово');
+      const usePersonas = $('usePersonas').checked;
+      if (usePersonas) {
+        const result = await api('/api/personas-copy', { method: 'POST', body: JSON.stringify({ brief: current.brief, variation }) });
+        personas = result.personas;
+        lastVariation = null;
+        current.personas = personas;
+        current.copy = personas[0]?.copy;
+        current.qa = personas[0]?.qa;
+        current.caption = personas[0] ? formatCaption(personas[0].copy) : '';
+        upsertProject(current);
+        showResult(current);
+        renderProjects();
+        logLine(`[2] Готово: ${personas.length} вариантов`);
+      } else {
+        personas = null;
+        const { copy, qa } = await api('/api/copy', { method: 'POST', body: JSON.stringify({ brief: current.brief, variation }) });
+        addAvoid(text, copy.slides.map(s => s.headline), current.brief.slides.map(s => s.idea));
+        lastVariation = null;
+        current.copy = copy; current.qa = qa;
+        current.caption = formatCaption(copy);
+        upsertProject(current);
+        showResult(current);
+        renderProjects();
+        logLine('[2] Готово');
+      }
       step = 'render';
     }
     if (step === 'render') {
@@ -416,6 +480,11 @@ async function saveEdits() {
     logLine('Проверка правил…');
     const qa = await api('/api/check', { method: 'POST', body: JSON.stringify({ brief: current.brief, copy }) });
     current.copy = copy; current.qa = qa; current.caption = formatCaption(copy);
+    if (personas && personas.length > 0) {
+      const activeIdx = Array.from(document.querySelectorAll('.tab')).findIndex(t => t.classList.contains('active'));
+      if (activeIdx >= 0) personas[activeIdx].copy = copy;
+      if (activeIdx >= 0) personas[activeIdx].qa = qa;
+    }
     showQa(qa);
     logLine('Перерисовка без нейросети…');
     await renderSlides(current.brief, copy);

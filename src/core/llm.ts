@@ -139,3 +139,31 @@ export async function callJson<T>(
   }
   throw new Error(`Модель вернула невалидный JSON на шаге ${promptName}`);
 }
+
+/** Вызов LLM с кастомным system-промптом (для персонажей и вариаций) */
+export async function callJsonWithCustomPrompt<T>(
+  systemPrompt: string,
+  input: unknown,
+  schema: z.ZodType<T>,
+  opts?: { temperature?: number },
+): Promise<T> {
+  if (!client) throw new Error('Нет ключа Gemini');
+  const messages: OpenAI.ChatCompletionMessageParam[] = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: JSON.stringify(input, null, 2) },
+  ];
+  const temperature = opts?.temperature ?? 0.8;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const text = await complete(messages, temperature, true);
+    try {
+      return schema.parse(JSON.parse(extractJson(text)));
+    } catch (err) {
+      messages.push({ role: 'assistant', content: text });
+      messages.push({
+        role: 'user',
+        content: `Ответ невалиден: ${String(err)}. Верни исправленный JSON строго по формату.`,
+      });
+    }
+  }
+  throw new Error('Модель вернула невалидный JSON');
+}
